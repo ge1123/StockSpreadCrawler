@@ -4,17 +4,36 @@ from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.support.ui import Select
-from datetime import datetime, timedelta
+from datetime import datetime, time, timedelta
+import time
 import pandas as pd
 import pymssql
 
 # stock_id: str = "2330"
 # report_date: str = "20240126"
+stock_holding_levels = {
+    '1-999': 1,
+    '1,000-5,000': 2,
+    '5,001-10,000': 3,
+    '10,001-15,000': 4,
+    '15,001-20,000': 5,
+    '20,001-30,000': 6,
+    '30,001-40,000': 7,
+    '40,001-50,000': 8,
+    '50,001-100,000': 9,
+    '100,001-200,000': 10,
+    '200,001-400,000': 11,
+    '400,001-600,000': 12,
+    '600,001-800,000': 13,
+    '800,001-1,000,000': 14,
+    '1,000,001以上': 15,
+    '差異數調整（說明4）': 16,
+    '合　計': 17
+}
 
 
-def query_stock_id() -> Series:
-    # 连接到 SQL Server 数据库
-    conn: pymssql.Connection = pymssql.connect(
+def get_db_connection() -> pymssql.Connection:
+    return pymssql.connect(
         host='172.29.60.101',
         port=1444,
         user='sa',
@@ -23,38 +42,35 @@ def query_stock_id() -> Series:
         charset='utf8'
     )
 
-    try:
-        cursor: pymssql.Cursor = conn.cursor()
 
-        cursor.execute('SELECT * FROM company_info')
-
-        rows: list = cursor.fetchall()
-
-        columns: list = [column[0] for column in cursor.description]
-
-        df: pd.DataFrame = pd.DataFrame(rows, columns=columns)
-
-        return df["stock_id"]
-    finally:
-        conn.close()
+def query_stock_id(conn: pymssql.Connection) -> Series:
+    cursor: pymssql.Cursor = conn.cursor()
+    cursor.execute('SELECT * FROM company_info')
+    rows: list = cursor.fetchall()
+    columns: list = [column[0] for column in cursor.description]
+    df: pd.DataFrame = pd.DataFrame(rows, columns=columns)
+    return df["stock_id"]
 
 
-def get_stock_distribution(stock_id: str, report_date: str):
+def open_browser():
     options = webdriver.ChromeOptions()
     options.add_argument(
         'user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/90.0.4430.93 Safari/537.36')
 
     driver = webdriver.Chrome(options=options)
+    driver.get("https://www.tdcc.com.tw/portal/zh/smWeb/qryStock")
+    return driver
 
+
+def get_stock_distribution(driver: webdriver.Chrome, stock_id: str, report_date: str):
     try:
-
-        driver.get("https://www.tdcc.com.tw/portal/zh/smWeb/qryStock")
 
         # 輸入股票代號
         input_element = WebDriverWait(driver, 10).until(
             EC.presence_of_element_located(
                 (By.XPATH, "/html/body/div[1]/div[1]/div/main/div[4]/form/table/tbody/tr[2]/td[2]/input"))
         )
+        input_element.clear()
         input_element.send_keys(stock_id)
 
         # 選擇日期
@@ -91,14 +107,54 @@ def get_stock_distribution(stock_id: str, report_date: str):
             data.append([cell.text for cell in cells])
 
         df = pd.DataFrame(data, columns=headers)
-        print(df)
-    finally:
-        # driver.quit()
-        print("hello")
+        save_to_db(stock_id, report_date, df, conn)
+        # print(df)
+        print(stock_id, report_date, "成功")
+        driver.refresh()
+        return 1
+
+    except pymssql.IntegrityError as e:
+        print(stock_id, report_date, "資料庫已有資料")
+        return 1
+
+    except Exception as e:
+        print(stock_id, report_date, "失敗", e)
+        element = driver.find_element(
+            By.XPATH, "/html/body/div[1]/div[1]/div/main/div[6]/div/table/tbody/tr/td/span")
+
+        print(element.text)
+        if element.text == "查無此資料":
+            print(stock_id, report_date, "找不到相關資料", e)
+            return 1
+
+        driver.refresh()
+        return 0
+    # finally:
+
+
+def save_to_db(stock_id, report_date, df, conn):
+    # 先做映射
+    df['持股/單位數分級'] = df['持股/單位數分級'].map(stock_holding_levels)
+
+    # 去除逗号并转换为整数
+    df['人數'] = df['人數'].str.replace(',', '').replace(
+        '', '0').apply(lambda x: int(x))
+    df['股數/單位數'] = df['股數/單位數'].str.replace(',',
+                                            '').replace('', '0').apply(lambda x: int(x))
+
+    report_date = pd.to_datetime(report_date, format='%Y%m%d')
+
+    cursor = conn.cursor()
+    for index, row in df.iterrows():
+        cursor.execute("""
+            INSERT INTO stock_distribution (stock_id, stock_unit_range, people_count, stock_unit_count, proportion, report_date)
+            VALUES (%s, %s, %s, %s, %s, %s)
+        """, (stock_id, row['持股/單位數分級'], row['人數'], row['股數/單位數'], row['占集保庫存數比例 (%)'], report_date))
+    conn.commit()
 
 
 report_dates = [
-    "20240517",
+    # "20240517",
     # "20240510",
     # "20240503",
     # "20240426",
@@ -149,16 +205,27 @@ report_dates = [
     # "20230617",
     # "20230609",
     # "20230602",
-    # "20230526"
+    "20230526"
 ]
 
+# 資料庫連線
+conn = get_db_connection()
 
-# 取得stock_id
-stock_ids: Series = query_stock_id()
-
-i = 0
+# 股票id
+stock_ids = query_stock_id(conn)
+driver = open_browser()
 for stock_id in stock_ids:
-    print(stock_id)
-    # for report_date in report_dates:
-    #     i += 1
-    #     print(stock_id, report_date, i)
+    if stock_id <= 2762:
+        continue
+
+    for report_date in report_dates:
+        status = get_stock_distribution(driver, stock_id, report_date)
+
+        while status == 0:
+            status = get_stock_distribution(driver, stock_id, report_date)
+# print(stock_id, report_date)
+
+# 關閉資料庫連線
+conn.close()
+# 取得stock_id
+# stock_ids: Series = query_stock_id()
