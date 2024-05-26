@@ -8,6 +8,7 @@ from datetime import datetime, time, timedelta
 import time
 import pandas as pd
 import pymssql
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 # stock_id: str = "2330"
 # report_date: str = "20240126"
@@ -62,7 +63,7 @@ def open_browser():
     return driver
 
 
-def get_stock_distribution(driver: webdriver.Chrome, stock_id: str, report_date: str):
+def get_stock_distribution(driver: webdriver.Chrome, stock_id: str, report_date: str, conn: pymssql.Connection):
     try:
 
         # 輸入股票代號
@@ -153,8 +154,24 @@ def save_to_db(stock_id, report_date, df, conn):
     conn.commit()
 
 
+def process_stock(driver, stock_id: str, report_date: str, conn: pymssql.Connection):
+    # driver = open_browser()
+    # try:
+    status = get_stock_distribution(driver, stock_id, report_date, conn)
+    driver.quit()
+    while status == 0:
+        time.sleep(5)
+        status = get_stock_distribution(
+            driver, stock_id, report_date, conn)
+        driver.quit()
+
+    # finally:
+    #     driver.quit()
+
+
 report_dates = [
-    # "20240517",
+    # "20240524",
+    "20240517",
     # "20240510",
     # "20240503",
     # "20240426",
@@ -205,7 +222,7 @@ report_dates = [
     # "20230617",
     # "20230609",
     # "20230602",
-    "20230526"
+    # "20230526"
 ]
 
 # 資料庫連線
@@ -213,19 +230,15 @@ conn = get_db_connection()
 
 # 股票id
 stock_ids = query_stock_id(conn)
-driver = open_browser()
-for stock_id in stock_ids:
-    if stock_id <= 2762:
-        continue
 
-    for report_date in report_dates:
-        status = get_stock_distribution(driver, stock_id, report_date)
+with ThreadPoolExecutor(max_workers=10) as executor:
+    futures = []
+    for stock_id in stock_ids:
+        for report_date in report_dates:
+            print(f"start: {stock_id}_{report_date}")
+            futures.append(executor.submit(
+                process_stock, open_browser(), stock_id, report_date, conn))
 
-        while status == 0:
-            status = get_stock_distribution(driver, stock_id, report_date)
-# print(stock_id, report_date)
-
-# 關閉資料庫連線
+    for future in as_completed(futures):
+        future.result()
 conn.close()
-# 取得stock_id
-# stock_ids: Series = query_stock_id()
