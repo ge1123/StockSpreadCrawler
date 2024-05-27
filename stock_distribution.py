@@ -53,17 +53,18 @@ def query_stock_id(conn: pymssql.Connection) -> Series:
     return df["stock_id"]
 
 
-def open_browser():
+def open_browser(i):
     options = webdriver.ChromeOptions()
     options.add_argument(
         'user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/90.0.4430.93 Safari/537.36')
 
     driver = webdriver.Chrome(options=options)
     driver.get("https://www.tdcc.com.tw/portal/zh/smWeb/qryStock")
+    print(f"瀏覽器開啟: {i}")
     return driver
 
 
-def get_stock_distribution(driver: webdriver.Chrome, stock_id: str, report_date: str, conn: pymssql.Connection):
+def get_stock_distribution(driver: webdriver.Chrome, stock_id: str, report_date: str):
     try:
 
         # 輸入股票代號
@@ -108,62 +109,83 @@ def get_stock_distribution(driver: webdriver.Chrome, stock_id: str, report_date:
             data.append([cell.text for cell in cells])
 
         df = pd.DataFrame(data, columns=headers)
-        save_to_db(stock_id, report_date, df, conn)
-        # print(df)
+
+        if df.empty:
+            print(f"{stock_id}_{report_date} 查無資料")
+        else:
+            print(f"{stock_id}_{report_date}_有資料")
+
+        insert_status = save_to_db(stock_id, report_date, df)
+
         print(stock_id, report_date, "成功")
         driver.refresh()
         return 1
 
     except pymssql.IntegrityError as e:
         print(stock_id, report_date, "資料庫已有資料")
+        driver.refresh()
         return 1
 
     except Exception as e:
-        print(stock_id, report_date, "失敗", e)
-        element = driver.find_element(
-            By.XPATH, "/html/body/div[1]/div[1]/div/main/div[6]/div/table/tbody/tr/td/span")
-
-        print(element.text)
+        # print(element.text)
         if element.text == "查無此資料":
             print(stock_id, report_date, "找不到相關資料", e)
             return 1
 
-        driver.refresh()
+        print(stock_id, report_date, "失敗", e)
+        element = driver.find_element(
+            By.XPATH, "/html/body/div[1]/div[1]/div/main/div[6]/div/table/tbody/tr/td/span")
+
+        driver.close()
         return 0
     # finally:
 
 
-def save_to_db(stock_id, report_date, df, conn):
-    # 先做映射
-    df['持股/單位數分級'] = df['持股/單位數分級'].map(stock_holding_levels)
+def save_to_db(stock_id, report_date, df):
+    conn = get_db_connection()
+    print(f"{stock_id}_{report_date} 存檔開始")
 
-    # 去除逗号并转换为整数
-    df['人數'] = df['人數'].str.replace(',', '').replace(
-        '', '0').apply(lambda x: int(x))
-    df['股數/單位數'] = df['股數/單位數'].str.replace(',',
-                                            '').replace('', '0').apply(lambda x: int(x))
+    try:
+        # 先做映射
+        df['持股/單位數分級'] = df['持股/單位數分級'].map(stock_holding_levels)
 
-    report_date = pd.to_datetime(report_date, format='%Y%m%d')
+        # 去除逗号并转换为整数
+        df['人數'] = df['人數'].str.replace(',', '').replace(
+            '', '0').apply(lambda x: int(x))
+        df['股數/單位數'] = df['股數/單位數'].str.replace(',',
+                                                '').replace('', '0').apply(lambda x: int(x))
 
-    cursor = conn.cursor()
-    for index, row in df.iterrows():
-        cursor.execute("""
-            INSERT INTO stock_distribution (stock_id, stock_unit_range, people_count, stock_unit_count, proportion, report_date)
-            VALUES (%s, %s, %s, %s, %s, %s)
-        """, (stock_id, row['持股/單位數分級'], row['人數'], row['股數/單位數'], row['占集保庫存數比例 (%)'], report_date))
-    conn.commit()
+        report_date = pd.to_datetime(report_date, format='%Y%m%d')
+
+        cursor = conn.cursor()
+        for index, row in df.iterrows():
+            cursor.execute("""
+                INSERT INTO stock_distribution (stock_id, stock_unit_range, people_count, stock_unit_count, proportion, report_date)
+                VALUES (%s, %s, %s, %s, %s, %s)
+            """, (stock_id, row['持股/單位數分級'], row['人數'], row['股數/單位數'], row['占集保庫存數比例 (%)'], report_date))
+        conn.commit()
+        print(f"{stock_id}_{report_date} 存檔結束")
+        return 0
+    except Exception as e:
+        print(f"存檔時發生錯誤: {e}")
+        conn.rollback()
+        return -1
+    finally:
+        conn.close()
 
 
-def process_stock(driver, stock_id: str, report_date: str, conn: pymssql.Connection):
+def process_stock(driver, stock_id: str, report_date: str):
     # driver = open_browser()
     # try:
-    status = get_stock_distribution(driver, stock_id, report_date, conn)
-    driver.quit()
+    status = get_stock_distribution(driver, stock_id, report_date)
+    print("bowser refrest")
+    driver.refresh()
     while status == 0:
-        time.sleep(5)
+        open_browser()
         status = get_stock_distribution(
-            driver, stock_id, report_date, conn)
-        driver.quit()
+            driver, stock_id, report_date)
+        print("bowser refrest")
+        driver.refresh()
 
     # finally:
     #     driver.quit()
@@ -171,26 +193,26 @@ def process_stock(driver, stock_id: str, report_date: str, conn: pymssql.Connect
 
 report_dates = [
     # "20240524",
-    "20240517",
+    # "20240517",
     # "20240510",
     # "20240503",
-    # "20240426",
-    # "20240419",
-    # "20240412",
-    # "20240403",
-    # "20240329",
-    # "20240322",
-    # "20240315",
-    # "20240308",
-    # "20240301",
-    # "20240223",
-    # "20240217",
-    # "20240207",
-    # "20240202",
-    # "20240126",
-    # "20240119",
-    # "20240112",
-    # "20240105",
+    "20240426",
+    "20240419",
+    "20240412",
+    "20240403",
+    "20240329",
+    "20240322",
+    "20240315",
+    "20240308",
+    "20240301",
+    "20240223",
+    "20240217",
+    "20240207",
+    "20240202",
+    "20240126",
+    "20240119",
+    "20240112",
+    "20240105",
     # "20231229",
     # "20231222",
     # "20231215",
@@ -230,15 +252,24 @@ conn = get_db_connection()
 
 # 股票id
 stock_ids = query_stock_id(conn)
+conn.close()
 
 with ThreadPoolExecutor(max_workers=10) as executor:
+    print("開啟瀏覽器")
+    drivers = [open_browser(i) for i in range(10)]  # 初始化十個瀏覽器
+
+    print("開始爬蟲")
     futures = []
-    for stock_id in stock_ids:
-        for report_date in report_dates:
+    for report_date in report_dates:
+        for stock_id in stock_ids:
             print(f"start: {stock_id}_{report_date}")
+            driver = drivers.pop(0)  # 從列表中取出一個瀏覽器
             futures.append(executor.submit(
-                process_stock, open_browser(), stock_id, report_date, conn))
+                process_stock, driver, stock_id, report_date))
+            drivers.append(driver)
 
     for future in as_completed(futures):
         future.result()
-conn.close()
+
+    for driver in drivers:
+        driver.quit()  # 關閉所有瀏覽器
